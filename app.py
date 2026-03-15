@@ -260,6 +260,16 @@ def run_scan(fetch_limit: int, min_tvl: float, min_fees: float, skip_dex: bool):
 
 # ─── CARD RENDERER ────────────────────────────────────────────────────────────
 
+def metric_box(label: str, value: str, cls: str = "val-neutral") -> str:
+    """Return a single metric box HTML snippet — no newlines, no indentation."""
+    return (
+        f'<div class="metric-box">'
+        f'<div class="metric-label">{label}</div>'
+        f'<div class="metric-val {cls}">{value}</div>'
+        f'</div>'
+    )
+
+
 def render_card(rank: int, r: dict, investment: float, period: str) -> None:
     met   = r["met"]
     dex   = r["dex"] or {}
@@ -267,21 +277,18 @@ def render_card(rank: int, r: dict, investment: float, period: str) -> None:
     bd    = r["bd"]
     roi   = scanner.estimate_roi(met, investment)
 
-    symbol = dex.get("symbol") or met.get("_symbol", met["name"].split("-")[0])
-    name   = dex.get("name", met["name"])
-    tier   = "hot" if score >= 70 else "warm" if score >= 50 else "caution"
+    symbol   = dex.get("symbol") or met.get("_symbol", met["name"].split("-")[0])
+    name     = dex.get("name", met["name"])
+    tier     = "hot" if score >= 70 else "warm" if score >= 50 else "caution"
+    tier_lbl = {"hot": "🔥 HOT", "warm": "⚡ WARM", "caution": "⚠ CAUTION"}[tier]
+    sc_col   = score_color(score)
 
-    tier_emoji = {"hot": "🔥 HOT", "warm": "⚡ WARM", "caution": "⚠ CAUTION"}[tier]
-    tier_badge_class = f"badge-{tier}"
-    card_class = f"card-{tier}"
-    sc_col = score_color(score)
-
-    # Pool URLs
+    # URLs
     dex_url  = dex.get("dex_url") or f"https://dexscreener.com/solana/{met['pool_addr']}"
     rug_url  = f"https://rugcheck.xyz/tokens/{met['token_addr']}"
     pool_url = f"https://app.meteora.ag/dlmm/{met['pool_addr']}"
 
-    # Metrics
+    # Core metrics
     ftv     = met["fee_tvl_24h"]
     est_apr = ftv * 365
     ftv_cls = "val-good" if ftv >= 1.0 else "val-mid" if ftv >= 0.5 else "val-bad"
@@ -289,159 +296,129 @@ def render_card(rank: int, r: dict, investment: float, period: str) -> None:
     age     = dex.get("age_days")
     txns    = dex.get("txns_1h")
     ch      = dex.get("ch_24h")
-
-    # Age display
     age_str = f"{age}d" if age is not None else "—"
-    age_cls = "val-good" if age is not None and 2 <= age <= 10 else "val-mid" if age is not None and age < 1 else "val-neutral"
+    age_cls = ("val-good" if age is not None and 2 <= age <= 10
+               else "val-mid" if age is not None and age < 1
+               else "val-neutral")
 
-    # ROI rows
-    roi_rows = [
+    # ── Build metric boxes as a flat list ─────────────────────────────────────
+    # Each item is a compact single-line HTML string — no newlines inside.
+    # This is the key fix: Streamlit doesn't sanitize variable interpolations
+    # that contain only well-formed, newline-free HTML strings.
+    boxes = [
+        metric_box("Pool TVL",  fmt_usd(met["liquidity"])),
+        metric_box("24h Volume",fmt_usd(met["vol_24h"])),
+        metric_box("24h Fees",  fmt_usd(met["fees_24h"]),  "val-good"),
+        metric_box("Fee/TVL",   f"{ftv:.2f}%",              ftv_cls),
+        metric_box("Est. APR",  f"~{est_apr:.0f}%",         ftv_cls),
+        metric_box("Bin Step",  f"{met['bin_step']} bps"),
+    ]
+    if dex:
+        mcap = dex.get("mcap", 0)
+        if mcap:
+            boxes.append(metric_box("MCap",     fmt_usd(mcap)))
+            boxes.append(metric_box("Vol/MCap", f"{vm:.2f}x", vm_class(vm)))
+        if txns is not None:
+            boxes.append(metric_box("Txns/hr",  str(txns),
+                                    "val-good" if txns >= 100 else "val-mid"))
+        if ch is not None:
+            boxes.append(metric_box("Price Δ 24h", fmt_pct(ch), ch_class(ch)))
+        if age is not None:
+            boxes.append(metric_box("Pair age", age_str, age_cls))
+
+    metrics_html = "".join(boxes)
+
+    # ── ROI rows ──────────────────────────────────────────────────────────────
+    roi_items = [
         ("daily",   "Daily",   roi.get("daily_low",  0), roi.get("daily_high",  0)),
         ("weekly",  "Weekly",  roi.get("weekly_low", 0), roi.get("weekly_high", 0)),
         ("monthly", "Monthly", roi.get("monthly_low",0), roi.get("monthly_high",0)),
     ] if roi else []
 
-    # Flags
+    roi_rows = []
+    for key, label, lo, hi in roi_items:
+        active  = key == period
+        p_cls   = "roi-active" if active else ""
+        r_cls   = "roi-range-active" if active else "roi-range-gray"
+        marker  = '<span class="roi-marker">&#x25B6;</span>' if active else '<span style="width:14px;display:inline-block"></span>'
+        roi_rows.append(
+            f'<div class="roi-row">'
+            f'<span class="roi-period {p_cls}">{marker}&nbsp;{label}</span>'
+            f'<span class="roi-range {r_cls}">~{fmt_usd(lo)}&nbsp;&ndash;&nbsp;{fmt_usd(hi)}</span>'
+            f'</div>'
+        )
+    roi_html   = "".join(roi_rows)
+    apr_str    = f"{roi.get('apr_pct', 0)}%" if roi else "—"
+    share_str  = f"{roi.get('pool_share', 0)}%" if roi else "—"
+
+    # ── Flags ─────────────────────────────────────────────────────────────────
     flags_html = "".join(
-        f'<div class="flag-row">⚠ {f}</div>'
+        f'<div class="flag-row">&#x26A0; {f}</div>'
         for f in bd.get("flags", [])
     )
 
-    # Strategy (shortened)
+    # ── Strategy ──────────────────────────────────────────────────────────────
     strat = scanner.recommend_strategy(met, dex or None)
     strat_short = strat.split(" —")[0] if " —" in strat else strat
 
-    # ROI rows HTML
-    roi_rows_html = ""
-    for key, label, lo, hi in roi_rows:
-        active    = key == period
-        p_class   = "roi-active" if active else ""
-        r_class   = "roi-range-active" if active else "roi-range-gray"
-        marker    = '<span class="roi-marker">▶</span>' if active else '<span style="width:14px;display:inline-block"></span>'
-        roi_rows_html += f"""
-        <div class="roi-row">
-          <span class="roi-period {p_class}">{marker} {label}</span>
-          <span class="roi-range {r_class}">~{fmt_usd(lo)} – {fmt_usd(hi)}</span>
-        </div>"""
+    # ── Assemble full card as one string ──────────────────────────────────────
+    # Every piece is already a compact HTML string.
+    # One single st.markdown() call — no nested f-string interpolation issues.
+    card = (
+        f'<div class="pool-card card-{tier}">' +
 
-    apr_str   = f"{roi.get('apr_pct', 0)}%" if roi else "—"
-    share_str = f"{roi.get('pool_share', 0)}%" if roi else "—"
+        # Header
+        f'<div class="card-header">' +
+        f'<div class="card-rank-symbol">' +
+        f'<span class="rank">#{rank}</span>' +
+        f'<div>' +
+        f'<div class="symbol">{symbol}<span style="color:#475569;font-size:14px;font-weight:400">/SOL</span></div>' +
+        f'<div class="pool-name">{name}</div>' +
+        f'</div></div>' +
+        f'<span class="tier-badge badge-{tier}">{tier_lbl}</span>' +
+        f'</div>' +
 
-    # Optional DexScreener metrics row
-    dex_metrics_html = ""
-    if dex:
-        mcap = dex.get("mcap", 0)
-        if mcap:
-            dex_metrics_html += f"""
-            <div class="metric-box">
-              <div class="metric-label">MCap</div>
-              <div class="metric-val val-neutral">{fmt_usd(mcap)}</div>
-            </div>
-            <div class="metric-box">
-              <div class="metric-label">Vol/MCap</div>
-              <div class="metric-val {vm_class(vm)}">{vm:.2f}x</div>
-            </div>"""
-        if txns is not None:
-            txn_cls = "val-good" if txns >= 100 else "val-mid"
-            dex_metrics_html += f"""
-            <div class="metric-box">
-              <div class="metric-label">Txns/hr</div>
-              <div class="metric-val {txn_cls}">{txns}</div>
-            </div>"""
-        if ch is not None:
-            dex_metrics_html += f"""
-            <div class="metric-box">
-              <div class="metric-label">Price Δ 24h</div>
-              <div class="metric-val {ch_class(ch)}">{fmt_pct(ch)}</div>
-            </div>"""
-        if age is not None:
-            dex_metrics_html += f"""
-            <div class="metric-box">
-              <div class="metric-label">Pair age</div>
-              <div class="metric-val {age_cls}">{age_str}</div>
-            </div>"""
+        # Score bar
+        f'<div class="score-row">' +
+        f'<span class="score-label">LP SCORE</span>' +
+        f'<div class="score-track"><div class="score-fill" style="width:{score}%;background:{sc_col}"></div></div>' +
+        f'<span class="score-num" style="color:{sc_col}">{score}/100</span>' +
+        f'</div>' +
 
-    st.markdown(f"""
-    <div class="pool-card {card_class}">
+        # Metrics grid
+        f'<div class="metrics-grid">{metrics_html}</div>' +
 
-      <!-- Header -->
-      <div class="card-header">
-        <div class="card-rank-symbol">
-          <span class="rank">#{rank}</span>
-          <div>
-            <div class="symbol">{symbol}<span style="color:#475569;font-size:14px;font-weight:400">/SOL</span></div>
-            <div class="pool-name">{name}</div>
-          </div>
-        </div>
-        <span class="tier-badge {tier_badge_class}">{tier_emoji}</span>
-      </div>
+        # ROI section
+        f'<div class="roi-section">' +
+        f'<div class="roi-title">ROI on {fmt_usd(investment)}</div>' +
+        roi_html +
+        f'<div style="display:flex;gap:20px;margin-top:8px;font-size:11px;' +
+        f'font-family:Space Mono,monospace;color:#475569">' +
+        f'<span>APR:&nbsp;<span style="color:#94a3b8">{apr_str}</span></span>' +
+        f'<span>Share:&nbsp;<span style="color:#94a3b8">{share_str}</span></span>' +
+        f'</div></div>' +
 
-      <!-- Score bar -->
-      <div class="score-row">
-        <span class="score-label">LP SCORE</span>
-        <div class="score-track">
-          <div class="score-fill" style="width:{score}%;background:{sc_col}"></div>
-        </div>
-        <span class="score-num" style="color:{sc_col}">{score}/100</span>
-      </div>
+        # Strategy
+        f'<div class="strategy-row">' +
+        f'<span class="strategy-label">Strategy</span>' +
+        f'<span class="strategy-val">{strat_short}</span>' +
+        f'</div>' +
 
-      <!-- Core pool metrics -->
-      <div class="metrics-grid">
-        <div class="metric-box">
-          <div class="metric-label">Pool TVL</div>
-          <div class="metric-val val-neutral">{fmt_usd(met['liquidity'])}</div>
-        </div>
-        <div class="metric-box">
-          <div class="metric-label">24h Volume</div>
-          <div class="metric-val val-neutral">{fmt_usd(met['vol_24h'])}</div>
-        </div>
-        <div class="metric-box">
-          <div class="metric-label">24h Fees</div>
-          <div class="metric-val val-good">{fmt_usd(met['fees_24h'])}</div>
-        </div>
-        <div class="metric-box">
-          <div class="metric-label">Fee/TVL 24h</div>
-          <div class="metric-val {ftv_cls}">{ftv:.2f}%</div>
-        </div>
-        <div class="metric-box">
-          <div class="metric-label">Est. APR</div>
-          <div class="metric-val {ftv_cls}">~{est_apr:.0f}%</div>
-        </div>
-        <div class="metric-box">
-          <div class="metric-label">Bin Step</div>
-          <div class="metric-val val-neutral">{met['bin_step']} bps</div>
-        </div>
-        {dex_metrics_html}
-      </div>
+        # Flags (empty string if none)
+        flags_html +
 
-      <!-- ROI section -->
-      <div class="roi-section">
-        <div class="roi-title">ROI on {fmt_usd(investment)}</div>
-        {roi_rows_html}
-        <div style="display:flex;gap:20px;margin-top:8px;font-size:11px;font-family:'Space Mono',monospace;color:#475569">
-          <span>APR: <span style="color:#94a3b8">{apr_str}</span></span>
-          <span>Your share: <span style="color:#94a3b8">{share_str}</span></span>
-        </div>
-      </div>
+        # Links
+        f'<div class="links-row">' +
+        f'<a class="pool-link link-dex" href="{dex_url}" target="_blank">&#x1F4C8; DexScreener</a>' +
+        f'<a class="pool-link link-rug" href="{rug_url}" target="_blank">&#x1F6E1; Rugcheck</a>' +
+        f'<a class="pool-link link-met" href="{pool_url}" target="_blank">&#x1F4A7; Meteora</a>' +
+        f'</div>' +
 
-      <!-- Strategy -->
-      <div class="strategy-row">
-        <span class="strategy-label">Strategy</span>
-        <span class="strategy-val">{strat_short}</span>
-      </div>
+        f'</div>'
+    )
 
-      <!-- Flags -->
-      {flags_html}
+    st.markdown(card, unsafe_allow_html=True)
 
-      <!-- Links -->
-      <div class="links-row">
-        <a class="pool-link link-dex" href="{dex_url}" target="_blank">📈 DexScreener</a>
-        <a class="pool-link link-rug" href="{rug_url}" target="_blank">🛡 Rugcheck</a>
-        <a class="pool-link link-met" href="{pool_url}" target="_blank">💧 Meteora</a>
-      </div>
-
-    </div>
-    """, unsafe_allow_html=True)
 
 
 # ─── SIDEBAR ──────────────────────────────────────────────────────────────────
