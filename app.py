@@ -60,6 +60,18 @@ section[data-testid="stSidebar"] h2 { color: #fff !important; font-size: 13px !i
 .card-warm::before  { background: #f59e0b; }
 .card-caution::before { background: #ef4444; }
 
+/* ── Responsive card grid ── */
+.card-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(340px, 1fr));
+    gap: 16px;
+    align-items: start;
+}
+@media (max-width: 720px) {
+    .card-grid { grid-template-columns: 1fr; }
+    .pool-card { margin-bottom: 0; }
+}
+
 /* ── Card header ── */
 .card-header {
     display: flex;
@@ -97,6 +109,9 @@ section[data-testid="stSidebar"] h2 { color: #fff !important; font-size: 13px !i
     grid-template-columns: repeat(3, 1fr);
     gap: 8px;
     margin-bottom: 14px;
+}
+@media (max-width: 480px) {
+    .metrics-grid { grid-template-columns: repeat(2, 1fr); }
 }
 .metric-box {
     background: rgba(0,0,0,.25);
@@ -464,12 +479,7 @@ with st.sidebar:
         index=1,
         horizontal=True,
     )
-    cols_count = st.radio(
-        "Card columns",
-        options=[1, 2, 3],
-        index=1,
-        horizontal=True,
-    )
+
 
     st.markdown("---")
     scan_btn = st.button("⚡ Scan Now", use_container_width=True)
@@ -560,20 +570,25 @@ if not display:
     st.warning("No pools match the selected tier filter. Try 'All'.")
     st.stop()
 
-# Render cards in columns
-if cols_count == 1:
-    for i, r in enumerate(display, 1):
-        render_card(i, r, investment, period)
-else:
-    col_lists = [[] for _ in range(cols_count)]
-    for i, r in enumerate(display):
-        col_lists[i % cols_count].append((i + 1, r))
+# Render cards in a responsive CSS grid — no st.columns() needed.
+# CSS auto-fill with minmax(340px,1fr) gives 2 cols on desktop,
+# 1 col on mobile. No Streamlit column clipping issues.
+card_htmls = []
+for i, r in enumerate(display, 1):
+    # Collect each card's HTML by temporarily redirecting st.markdown
+    _captured = []
+    _orig_md  = st.markdown
+    st.markdown = lambda html, **kw: _captured.append(html)
+    render_card(i, r, investment, period)
+    st.markdown = _orig_md
+    card_htmls.append(_captured[0] if _captured else "")
 
-    cols = st.columns(cols_count, gap="medium")
-    for col, items in zip(cols, col_lists):
-        with col:
-            for rank, r in items:
-                render_card(rank, r, investment, period)
+grid_html = (
+    '<div class="card-grid">' +
+    "".join(card_htmls) +
+    "</div>"
+)
+st.markdown(grid_html, unsafe_allow_html=True)
 
 st.markdown("""
 <div class="warn-box">
